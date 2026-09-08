@@ -653,6 +653,77 @@ const LINUX_POLICY_RULE_ARGS: [&str; 8] = [
 ];
 
 #[cfg(target_os = "linux")]
+const VPN_BOOTSTRAP_ENDPOINTS: [std::net::Ipv4Addr; 2] = [
+    std::net::Ipv4Addr::new(211, 65, 64, 100),
+    std::net::Ipv4Addr::new(211, 65, 66, 99),
+];
+
+fn bootstrap_policy_rule_args(action: &str, endpoint: std::net::Ipv4Addr) -> [String; 9] {
+    [
+        String::from("-4"),
+        String::from("rule"),
+        String::from(action),
+        String::from("priority"),
+        String::from("7999"),
+        String::from("to"),
+        format!("{endpoint}/32"),
+        String::from("lookup"),
+        String::from("main"),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn delete_bootstrap_rule_if_present(endpoint: std::net::Ipv4Addr) -> Result<bool> {
+    let args = bootstrap_policy_rule_args("del", endpoint);
+    let output = Command::new("ip")
+        .args(&args)
+        .output()
+        .with_context(|| format!("failed to remove bootstrap route for {endpoint}"))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("No such file") {
+        return Ok(false);
+    }
+    bail!("ip failed while removing bootstrap route for {endpoint}: {stderr}")
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxBootstrapRoutes {
+    installed: Vec<std::net::Ipv4Addr>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxBootstrapRoutes {
+    fn install() -> Result<Self> {
+        let mut guard = Self {
+            installed: Vec::new(),
+        };
+        for endpoint in VPN_BOOTSTRAP_ENDPOINTS {
+            while delete_bootstrap_rule_if_present(endpoint)? {
+                warn!(%endpoint, "removed a stale VPN bootstrap rule");
+            }
+            run_linux_command("ip", &bootstrap_policy_rule_args("add", endpoint))
+                .with_context(|| format!("failed to bypass Clash TUN for {endpoint}"))?;
+            guard.installed.push(endpoint);
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxBootstrapRoutes {
+    fn drop(&mut self) {
+        for endpoint in self.installed.drain(..).rev() {
+            if let Err(err) = delete_bootstrap_rule_if_present(endpoint) {
+                error!(%endpoint, error = %err, "failed to remove VPN bootstrap rule");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn delete_linux_policy_rule_if_present() -> Result<bool> {
     let mut args = vec![
         String::from("-4"),
@@ -1031,6 +1102,9 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    #[cfg(target_os = "linux")]
+    let _bootstrap_routes = LinuxBootstrapRoutes::install()?;
+
     if !cczuni::impls::client::DefaultClient::default()
         .webvpn_available()
         .await
@@ -1068,7 +1142,10 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SavedCredentials, netmask_to_prefix, parse_split_tunnel_route, route_contains};
+    use super::{
+        SavedCredentials, bootstrap_policy_rule_args, netmask_to_prefix, parse_split_tunnel_route,
+        route_contains,
+    };
     use std::net::Ipv4Addr;
 
     #[test]
@@ -1118,5 +1195,23 @@ mod tests {
         assert!(debug.contains("student"));
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("secret-password"));
+    }
+
+    #[test]
+    fn bootstrap_rule_only_bypasses_one_school_endpoint() {
+        assert_eq!(
+            bootstrap_policy_rule_args("add", Ipv4Addr::new(211, 65, 66, 99)),
+            [
+                "-4",
+                "rule",
+                "add",
+                "priority",
+                "7999",
+                "to",
+                "211.65.66.99/32",
+                "lookup",
+                "main",
+            ]
+        );
     }
 }

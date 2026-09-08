@@ -72,17 +72,23 @@ sudo ./target/release/cczu-vpn-proto --forget-login
 
 Linux 客户端会安装一条优先级为 `8000` 的策略规则，让 `main` 表中的非默认路由（包括校园网段和 VPN DNS）优先于 Clash Verge / Mihomo 通常安装的 `9000`—`9010` 规则。程序只增删这一条具有完整匹配参数的规则，不会停止 Clash 或修改 Clash 创建的规则，因此 Clash Verge 的 TUN 模式可以保持开启。
 
-如果还要同时开启 Clash Verge 的 **系统代理**，请在当前订阅关联的“规则增强”配置中置顶以下规则（应放在 `prepend`，不要放在 `append`）：
+Clash 使用 Fake-IP DNS 时，请在当前订阅关联的 **Merge** 中加入下面这一项，让登录入口获得真实 IP。不要加入 `tun.route-exclude-address`，它可能干扰 Mihomo 自动维护的 TUN 路由：
+
+```yaml
+dns:
+  fake-ip-filter:
+    - '+.cczu.edu.cn'
+```
+
+如果还同时开启 Clash Verge 的 **系统代理**，请在订阅关联的“规则增强”中保留以下直连规则（放在 `prepend`，不要放在 `append`）：
 
 ```yaml
 prepend:
-  - DOMAIN,zmvpn.cczu.edu.cn,DIRECT
-  - IP-CIDR,211.65.64.100/32,DIRECT,no-resolve
   - DOMAIN-SUFFIX,cczu.edu.cn,DIRECT
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
 ```
 
-这会明确保护 VPN 入口 `211.65.64.100`，覆盖截图中的 `172.22.226.31`，并让 `cczu.edu.cn` 域名通过 Mihomo 的 `DIRECT` 出站。客户端会为服务端下发的校园网地址及 VPN DNS 自动安装主路由和优先级 `8000` 的策略规则，所以这些直连流量随后会进入 CCZU VPN。规则增强会随订阅更新保留，比直接修改订阅生成的配置稳定。
+客户端会在认证前为 `211.65.64.100/32` 和 `211.65.66.99/32` 临时安装优先级 `7999` 的精确策略规则，避免登录流量经过 Clash TUN；退出时自动删除。它不会绕过其他网站，也不会增删 Mihomo 的 `9000`—`9010` 规则。登录后，`172.22.226.31` 等校园地址由优先级 `8000` 的规则送入 CCZU VPN。
 
 如果以后遇到不属于 `172.16.0.0/12` 或 `cczu.edu.cn` 的学校地址，需要把对应 CIDR 或域名继续加入 `prepend`。服务端下发的公共 IPv4 地址通常已由订阅中的中国大陆规则判定为 `DIRECT`，但显式加入规则最可靠。
 

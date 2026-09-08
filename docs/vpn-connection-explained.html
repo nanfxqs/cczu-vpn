@@ -92,7 +92,7 @@ TCP → zmvpn.cczu.edu.cn:443</pre>
       <p>CLI 会启动外部 <code>ip</code> 与 <code>resolvectl</code> 命令。仅给主程序授予 <code>CAP_NET_ADMIN</code> 不会自动把该能力传给这些命令，DNS 配置也可能需要 polkit 授权。因此建议以 root 身份运行：</p>
       <pre>cargo build --release --locked
 sudo ./target/release/cczu-vpn-proto</pre>
-      <p>与 Clash Verge 共存时可以保留 TUN 和系统代理，但应在规则增强的 <code>prepend</code> 中把 <code>zmvpn.cczu.edu.cn</code>、<code>211.65.64.100/32</code>、<code>cczu.edu.cn</code> 和 <code>172.16.0.0/12</code> 设为 <code>DIRECT</code>。客户端会为学校地址及 VPN DNS 安装主路由和一条优先级 8000 的策略规则，使 Mihomo 的直连出站进入 CCZU VPN。</p>
+      <p>与 Clash Verge 共存时可以保留 TUN 和系统代理。Merge 只需将 <code>+.cczu.edu.cn</code> 加入 DNS <code>fake-ip-filter</code>；不要配置 <code>tun.route-exclude-address</code>。客户端在认证期间用两个精确的 priority 7999 规则保护 SSO 与 VPN 入口，登录后再用 priority 8000 将学校地址及 VPN DNS 送入 CCZU VPN，不会改动 Mihomo 的 9000—9010 规则。</p>
     </article>
   </section>
 </main>
