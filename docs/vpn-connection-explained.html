@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCZU VPN Proto 连接图解</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101820; --panel:#182630; --line:#38505d; --text:#edf7fa; --muted:#b3c5cb; --ok:#72d69a; --warn:#ffcf66; --blue:#74d9ee; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,sans-serif; }
+    main { max-width:1120px; margin:auto; padding:42px 20px 70px; }
+    h1 { font-size:clamp(2rem,6vw,3.5rem); line-height:1.1; margin:0 0 10px; }
+    h2 { font-size:1.35rem; margin:0 0 12px; color:var(--blue); }
+    p { color:var(--muted); }
+    .lead { max-width:800px; font-size:1.15rem; }
+    .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:16px; margin-top:26px; }
+    .card { grid-column:span 12; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; }
+    .half { grid-column:span 6; }
+    .third { grid-column:span 4; }
+    .flow { display:flex; align-items:stretch; gap:8px; overflow-x:auto; }
+    .step { min-width:145px; flex:1; border:1px solid var(--line); border-radius:9px; padding:12px; background:#14212a; }
+    .arrow { align-self:center; color:var(--blue); font-size:1.5rem; }
+    .layer { border:1px solid var(--line); padding:11px; margin:7px 0; border-radius:7px; }
+    .tls { background:#183934; } .frame { background:#2b2540; } .ip { background:#322c20; }
+    code, pre { font-family:ui-monospace,monospace; background:#0d151b; border-radius:5px; }
+    code { padding:2px 5px; } pre { padding:14px; overflow:auto; color:#d7e8ed; }
+    table { border-collapse:collapse; width:100%; }
+    th, td { padding:9px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+    th { color:var(--blue); } .ok { color:var(--ok); font-weight:700; } .warn { color:var(--warn); font-weight:700; } .src { font-size:.88rem; }
+    @media (max-width:700px) { .half,.third { grid-column:span 12; } .flow { flex-direction:column; } .arrow { transform:rotate(90deg); align-self:center; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>CCZU VPN Proto<br>Linux 连接实现图解</h1>
+  <p class="lead">此项目使用 <strong>TUN 虚拟网卡</strong>承接内核 IP 包，以<strong>自定义二进制帧</strong>封装后，经由连接到 <code>zmvpn.cczu.edu.cn:443</code> 的 <strong>TLS 加密 TCP 连接</strong>发送。它不是 WireGuard、OpenVPN 或 IPsec。</p>
+  <section class="grid">
+    <article class="card">
+      <h2>运行时数据流</h2>
+      <div class="flow">
+        <div class="step"><b>1. SSO 登录</b><br><small>用户名、密码 → <code>cczuni</code></small></div><div class="arrow">→</div>
+        <div class="step"><b>2. 服务配置</b><br><small>获取 token、虚拟 IP、网关、DNS、校内网段</small></div><div class="arrow">→</div>
+        <div class="step"><b>3. TLS 连接</b><br><small>TCP 443 + Rustls</small></div><div class="arrow">→</div>
+        <div class="step"><b>4. 隧道鉴权</b><br><small>发送用户名 + token</small></div><div class="arrow">→</div>
+        <div class="step"><b>5. Linux 网络配置</b><br><small>创建 TUN、路由、DNS</small></div><div class="arrow">→</div>
+        <div class="step"><b>6. IP 包双向转发</b><br><small>TUN ↔ TLS 帧，约 5 秒心跳</small></div>
+      </div>
+    </article>
+    <article class="card half">
+      <h2>加密协议：TLS 1.3</h2>
+      <div class="layer">应用：SSO 请求、自定义鉴权帧和 IP 数据帧</div>
+      <div class="layer tls"><b>TLS</b>：Rustls / Tokio-Rustls 加密、认证、完整性保护</div>
+      <div class="layer frame"><b>TCP</b>：到服务端 443 端口的可靠字节流</div>
+      <div class="layer ip"><b>IP / Wi-Fi</b>：本机默认网络出口</div>
+      <p>本机对服务端实际探测：<span class="ok">TLS 1.3</span>、<span class="ok">TLS_AES_256_GCM_SHA384</span>、<span class="ok">X25519</span> 临时密钥交换，证书 <code>*.cczu.edu.cn</code> 验证通过。</p>
+      <p class="src">AES-256-GCM 提供数据加密和认证；X25519 提供前向保密。实际协商套件可能随服务端变化。</p>
+    </article>
+    <article class="card half">
+      <h2>TLS 证书验证默认开启</h2>
+      <p>CLI 默认使用 Mozilla 根证书集合验证服务器证书、域名和 TLS 签名。</p>
+      <p><span class="ok">已修复：</span><code>StartOptions::default().no_verification</code> 从 <code>true</code> 改为 <code>false</code>。</p>
+      <p><span class="warn">注意：</span>库 API 仍保留显式 <code>no_verification: true</code> 的危险兼容选项；CLI 不提供关闭验证的参数。</p>
+      <p class="src">源码：<code>src/types.rs</code>、<code>src/vpn/tls.rs</code></p>
+    </article>
+    <article class="card">
+      <h2>隧道帧：封装，不是第二层加密</h2>
+      <pre>Linux 内核 IP 包
+  ↓ TUN: CCZU-VPN-PROTO
+[version=1][kind=4][length: u16 big-endian][xid: 4 bytes][app_id=1][原始 IP 包]
+  ↓ TLS record（由 TLS 负责加密与完整性）
+TCP → zmvpn.cczu.edu.cn:443</pre>
+      <p><code>kind=4</code> 是数据帧，<code>kind=2</code> 是控制帧。自定义帧没有自己的加密或 MAC，它的安全性完全依赖外层 TLS。</p>
+      <p class="src">源码：<code>src/vpn/protocol/write.rs</code>、<code>read.rs</code>、<code>stream.rs</code></p>
+    </article>
+    <article class="card third"><h2>TUN</h2><p>Linux 三层虚拟网卡。程序从中读取原始 IP 包、向其中写回入站 IP 包；内核把它当作网络接口。它不加密，也不同于处理以太网帧的 TAP。</p></article>
+    <article class="card third"><h2>Split tunnel</h2><p>只让服务端下发的校内 IPv4 网段走 VPN，其他公网流量仍走默认路由。</p></article>
+    <article class="card third"><h2>Token</h2><p>SSO 成功后取得的临时授权凭据。隧道鉴权帧发送用户名与 token，而不是重复发送密码。</p></article>
+    <article class="card">
+      <h2>Linux CLI：本次补齐的三个功能</h2>
+      <table>
+        <thead><tr><th>功能</th><th>实现</th><th>退出或失败处理</th></tr></thead>
+        <tbody>
+          <tr><td>TLS 安全默认值</td><td><span class="ok">默认验证证书</span></td><td>仅库调用者显式开启才跳过验证</td></tr>
+          <tr><td>IPv4 分流路由</td><td><code>ip route</code> + 一条优先级 8000 的 <code>ip rule</code>，使 main 表非默认路由优先于 Clash TUN</td><td>启动时清残留；失败时回滚；退出时倒序删除</td></tr>
+          <tr><td>接口 DNS</td><td><code>resolvectl dns</code> + <code>resolvectl domain ~cczu.edu.cn</code></td><td>失败时回滚；退出时 <code>resolvectl revert</code></td></tr>
+        </tbody>
+      </table>
+      <p class="src">源码：<code>src/cli.rs</code>；仅在 <code>target_os = "linux"</code> 编译。</p>
+    </article>
+    <article class="card">
+      <h2>Linux 运行权限</h2>
+      <p>CLI 会启动外部 <code>ip</code> 与 <code>resolvectl</code> 命令。仅给主程序授予 <code>CAP_NET_ADMIN</code> 不会自动把该能力传给这些命令，DNS 配置也可能需要 polkit 授权。因此建议以 root 身份运行：</p>
+      <pre>cargo build --release --locked
+sudo ./target/release/cczu-vpn-proto</pre>
+      <p>与 Clash Verge 共存时可以保留 TUN 和系统代理，但应在规则增强的 <code>prepend</code> 中把 <code>zmvpn.cczu.edu.cn</code>、<code>211.65.64.100/32</code>、<code>cczu.edu.cn</code> 和 <code>172.16.0.0/12</code> 设为 <code>DIRECT</code>。客户端会为学校地址及 VPN DNS 安装主路由和一条优先级 8000 的策略规则，使 Mihomo 的直连出站进入 CCZU VPN。</p>
+    </article>
+  </section>
+</main>
+</body>
+</html>

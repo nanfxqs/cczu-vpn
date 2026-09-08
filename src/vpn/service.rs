@@ -17,7 +17,7 @@ use tokio::{
     time,
 };
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     auth::authorize,
@@ -76,6 +76,7 @@ struct StartingHandle {
 struct SessionHandle {
     id: u64,
     server: ProxyServer,
+    peer_ip: std::net::IpAddr,
     command_tx: mpsc::Sender<SessionCommand>,
     packet_rx: PacketQueueHandle,
     packet_queue_enabled: PacketQueueEnabled,
@@ -141,6 +142,16 @@ pub fn proxy_server() -> Option<ProxyServer> {
     };
     match guard.as_ref() {
         Some(SessionSlot::Running(handle)) => Some(handle.server.clone()),
+        _ => None,
+    }
+}
+
+pub fn proxy_peer_ip() -> Option<std::net::IpAddr> {
+    let Ok(guard) = SESSION.lock() else {
+        return None;
+    };
+    match guard.as_ref() {
+        Some(SessionSlot::Running(handle)) => Some(handle.peer_ip),
         _ => None,
     }
 }
@@ -254,6 +265,11 @@ async fn run_session_actor(
     }
     .await;
 
+    if let Err(err) = &actor_result {
+        error!(session_id, error = %err, "proxy session actor stopped with an error");
+    } else {
+        debug!(session_id, "proxy session actor stopped");
+    }
     clear_session_if_matches(session_id);
     actor_result
 }
@@ -319,6 +335,17 @@ pub async fn start_service_with_options(
         let tcpstream = TcpStream::connect(addr)
             .await
             .with_context(|| format!("failed to connect to proxy server at {addr}"))?;
+        let peer = tcpstream
+            .peer_addr()
+            .context("failed to query proxy peer address")?;
+        let local = tcpstream
+            .local_addr()
+            .context("failed to query proxy local address")?;
+        info!(
+            %peer,
+            %local,
+            "connected to proxy TCP endpoint"
+        );
         check_start_cancelled(&cancel)?;
         let server_name = "zmvpn.cczu.edu.cn"
             .try_into()
@@ -359,6 +386,7 @@ pub async fn start_service_with_options(
         Ok(SessionHandle {
             id: session_id,
             server: proxy,
+            peer_ip: peer.ip(),
             command_tx,
             packet_rx: Arc::new(Mutex::new(packet_queue_rx)),
             packet_queue_enabled,
@@ -490,7 +518,7 @@ pub async fn send_heartbeat() -> Result<()> {
     .await
 }
 
-pub fn start_polling_packet(callback: impl Send + 'static + Fn(u32, Vec<u8>) -> ()) -> Result<()> {
+pub fn start_polling_packet(callback: impl Send + 'static + Fn(u32, Vec<u8>)) -> Result<()> {
     stop_polling_packet();
     waiting_polling_packet_stop().context("poller thread panicked while restarting")?;
 

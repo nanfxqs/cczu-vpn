@@ -40,6 +40,8 @@ At the moment, Windows is the most complete path because it configures Wintun, D
 - Administrator privileges on Windows
 - Network access to `zmvpn.cczu.edu.cn`
 
+On Linux, install `iproute2`, `systemd-resolved`, and `libsecret` (for `secret-tool`), then run the client with `sudo`. After the first successful login, the CLI can save the credentials in the invoking desktop user's system keyring and reuse them on later runs. Use `--no-keyring` to bypass saved credentials or `--forget-login` to delete them.
+
 ### Run
 
 PowerShell:
@@ -63,7 +65,7 @@ cargo run --release
 
 ### Notes
 
-- The CLI uses the library default TLS option, which currently means `no_verification = true`.
+- The CLI verifies the TLS server certificate by default; library users only skip verification when they explicitly set `no_verification = true`.
 - Split-tunnel routes are removed on clean shutdown.
 - Packet and routing logs respect `RUST_LOG`.
 - If you are embedding this project into another application, the library API and UniFFI bindings are usually a better fit than shelling out to the CLI.
@@ -95,9 +97,7 @@ async fn main() -> Result<()> {
     service::start_service_with_options(
         "user",
         "password",
-        StartOptions {
-            no_verification: true,
-        },
+        StartOptions::default(),
     )
     .await?;
 
