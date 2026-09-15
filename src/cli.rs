@@ -998,6 +998,7 @@ async fn create_device() -> Result<()> {
         }
     };
     let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let connection_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let ctrl_c_interrupt_event = interrupt_event.clone();
     let ctrl_c_shutdown_requested = shutdown_requested.clone();
@@ -1012,12 +1013,22 @@ async fn create_device() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     });
 
-    if let Err(err) = service::start_polling_packet(move |a, b| {
-        debug!(packet_size = a, "received packet from proxy");
-        if let Err(err) = device_output.send(&b) {
-            error!(packet_size = a, error = %err, "failed to write packet to TUN device");
-        }
-    }) {
+    let disconnect_interrupt_event = interrupt_event.clone();
+    let disconnect_connection_lost = connection_lost.clone();
+    if let Err(err) = service::start_polling_packet_with_disconnect(
+        move |a, b| {
+            debug!(packet_size = a, "received packet from proxy");
+            if let Err(err) = device_output.send(&b) {
+                error!(packet_size = a, error = %err, "failed to write packet to TUN device");
+            }
+        },
+        move || {
+            disconnect_connection_lost.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Err(err) = disconnect_interrupt_event.trigger() {
+                error!(error = %err, "failed to interrupt TUN after proxy disconnect");
+            }
+        },
+    ) {
         shutdown_task.abort();
         #[cfg(target_os = "windows")]
         let _ = cleanup_split_tunnel_routes(device.as_ref(), &server, &split_tunnel_routes);
@@ -1038,6 +1049,12 @@ async fn create_device() -> Result<()> {
                     info!("tun read interrupted for shutdown");
                     break;
                 }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::Interrupted
+                        && connection_lost.load(std::sync::atomic::Ordering::Relaxed) =>
+                {
+                    bail!("proxy connection was lost");
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
                     warn!(error = %err, "tun read interrupted unexpectedly");
                     continue;
@@ -1055,9 +1072,9 @@ async fn create_device() -> Result<()> {
             } else {
                 debug!(packet_size = len, "read packet from tun device");
             }
-            if let Err(err) = service::send_tcp_packet(&buf[..len]).await {
-                error!(packet_size = len, error = %err, "failed to send packet to proxy");
-            }
+            service::send_tcp_packet(&buf[..len])
+                .await
+                .with_context(|| format!("failed to send {len}-byte packet to proxy"))?;
 
             if service::POLLER_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());

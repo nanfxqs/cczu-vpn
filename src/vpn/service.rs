@@ -518,7 +518,46 @@ pub async fn send_heartbeat() -> Result<()> {
     .await
 }
 
+async fn poll_packet_stream(
+    mut packet_rx: broadcast::Receiver<Vec<u8>>,
+    callback: impl Fn(u32, Vec<u8>),
+    on_disconnect: impl FnOnce(),
+) {
+    let mut on_disconnect = Some(on_disconnect);
+    loop {
+        if POLLER_SIGNAL.load(Ordering::Relaxed) {
+            break;
+        }
+        match time::timeout(Duration::from_millis(500), packet_rx.recv()).await {
+            Ok(Ok(packet)) => callback(packet.len() as u32, packet),
+            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                warn!(
+                    skipped_packets = skipped,
+                    "poller lagged and skipped packets"
+                );
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                if !POLLER_SIGNAL.load(Ordering::Relaxed)
+                    && let Some(callback) = on_disconnect.take()
+                {
+                    callback();
+                }
+                break;
+            }
+            Err(_) => {}
+        }
+    }
+    POLLER_SIGNAL.store(false, Ordering::Relaxed);
+}
+
 pub fn start_polling_packet(callback: impl Send + 'static + Fn(u32, Vec<u8>)) -> Result<()> {
+    start_polling_packet_with_disconnect(callback, || {})
+}
+
+pub fn start_polling_packet_with_disconnect(
+    callback: impl Send + 'static + Fn(u32, Vec<u8>),
+    on_disconnect: impl Send + 'static + FnOnce(),
+) -> Result<()> {
     stop_polling_packet();
     waiting_polling_packet_stop().context("poller thread panicked while restarting")?;
 
@@ -540,24 +579,7 @@ pub fn start_polling_packet(callback: impl Send + 'static + Fn(u32, Vec<u8>)) ->
                 .build()
                 .expect("Create polling runtime failed!");
             runtime.block_on(async move {
-                let mut packet_rx: broadcast::Receiver<Vec<u8>> = packet_tx.subscribe();
-                loop {
-                    if POLLER_SIGNAL.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match time::timeout(Duration::from_millis(500), packet_rx.recv()).await {
-                        Ok(Ok(packet)) => callback(packet.len() as u32, packet),
-                        Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                            warn!(
-                                skipped_packets = skipped,
-                                "poller lagged and skipped packets"
-                            );
-                        }
-                        Ok(Err(broadcast::error::RecvError::Closed)) => break,
-                        Err(_) => {}
-                    }
-                }
-                POLLER_SIGNAL.store(false, Ordering::Relaxed);
+                poll_packet_stream(packet_tx.subscribe(), callback, on_disconnect).await;
             });
         })
         .context("failed to spawn poller thread")?;
@@ -586,4 +608,34 @@ pub fn waiting_polling_packet_stop() -> Result<()> {
             .map_err(|_| anyhow!("poller thread panicked"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{POLLER_SIGNAL, poll_packet_stream};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::sync::broadcast;
+
+    #[tokio::test]
+    async fn closed_proxy_stream_reports_disconnect() {
+        POLLER_SIGNAL.store(false, Ordering::Relaxed);
+        let (packet_tx, packet_rx) = broadcast::channel(1);
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let callback_flag = disconnected.clone();
+        drop(packet_tx);
+
+        poll_packet_stream(
+            packet_rx,
+            |_, _| {},
+            move || {
+                callback_flag.store(true, Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        assert!(disconnected.load(Ordering::Relaxed));
+    }
 }
