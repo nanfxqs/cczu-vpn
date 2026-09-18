@@ -1,13 +1,14 @@
 use std::{
     io::{BufRead, Write, stdin, stdout},
     sync::Arc,
+    time::Duration,
 };
 
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
-use cczuni::impls::services::webvpn::WebVPNService;
+use cczuni::base::client::Client;
 use cczuvpnproto::{diag, vpn::service};
 use clap::Parser;
 use rpassword::prompt_password;
@@ -246,6 +247,23 @@ fn confirm_continue(prompt: &str) -> Result<bool> {
 
 fn confirm_explicitly(prompt: &str) -> Result<bool> {
     Ok(read_prompt(prompt)?.trim().eq_ignore_ascii_case("y"))
+}
+
+const VPN_AVAILABILITY_URL: &str = "https://zmvpn.cczu.edu.cn/enlink/sso/login";
+
+fn endpoint_reachable<T, E>(response: &std::result::Result<T, E>) -> bool {
+    response.is_ok()
+}
+
+async fn vpn_available() -> bool {
+    let client = cczuni::impls::client::DefaultClient::default();
+    let response = client
+        .reqwest_client()
+        .get(VPN_AVAILABILITY_URL)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    endpoint_reachable(&response)
 }
 
 #[cfg(target_os = "windows")]
@@ -1122,10 +1140,7 @@ pub async fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     let _bootstrap_routes = LinuxBootstrapRoutes::install()?;
 
-    if !cczuni::impls::client::DefaultClient::default()
-        .webvpn_available()
-        .await
-    {
+    if !vpn_available().await {
         warn!("webvpn availability check failed, asking user whether to continue");
         if !args.yes
             && !confirm_continue("webvpn may not be available, are you sure to connect? (Y/n) ")?
@@ -1160,8 +1175,8 @@ pub async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SavedCredentials, bootstrap_policy_rule_args, netmask_to_prefix, parse_split_tunnel_route,
-        route_contains,
+        SavedCredentials, bootstrap_policy_rule_args, endpoint_reachable, netmask_to_prefix,
+        parse_split_tunnel_route, route_contains,
     };
     use std::net::Ipv4Addr;
 
@@ -1230,5 +1245,11 @@ mod tests {
                 "main",
             ]
         );
+    }
+
+    #[test]
+    fn availability_accepts_any_http_response() {
+        assert!(endpoint_reachable(&Ok::<(), ()>(())));
+        assert!(!endpoint_reachable(&Err::<(), ()>(())));
     }
 }
