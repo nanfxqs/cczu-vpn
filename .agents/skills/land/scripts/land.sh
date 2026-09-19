@@ -12,13 +12,17 @@ cd "$repo_root"
 
 origin_url="$(git remote get-url origin 2>/dev/null)" ||
   die "origin remote is not configured"
+origin_ssh_url="git@github.com:nanfxqs/cczu-vpn.git"
 case "$origin_url" in
-  https://github.com/nanfxqs/cczu-vpn.git | git@github.com:nanfxqs/cczu-vpn.git)
+  https://github.com/nanfxqs/cczu-vpn.git | "$origin_ssh_url")
     ;;
   *)
     die "origin points to unexpected repository: $origin_url"
     ;;
 esac
+if [[ "$origin_url" != "$origin_ssh_url" ]]; then
+  git remote set-url origin "$origin_ssh_url"
+fi
 
 current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
   die "HEAD is detached"

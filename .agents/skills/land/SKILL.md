@@ -13,11 +13,11 @@ metadata:
 An invocation of this skill is the landing authorization. Proceed without
 asking for the same permission again.
 
-The repository publishes directly to `origin/main`. The `local` remote is a
-backlink to the user's primary checkout and is never a publication target.
-Use `.agents/skills/land/scripts/land.sh` for deterministic preflight,
-verification, synchronization, and publication. Keep scope selection, review,
-commit messages, and conflict judgment with the agent.
+The repository publishes directly to `origin/main`; prefer SSH for uploads.
+The `local` remote is a backlink to the user's primary checkout and is never a
+publication target. Use `.agents/skills/land/scripts/land.sh` for deterministic
+preflight, verification, synchronization, and publication. Keep scope
+selection, review, commit messages, and conflict judgment with the agent.
 
 ## 1. Establish the change
 
