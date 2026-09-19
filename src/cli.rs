@@ -786,37 +786,6 @@ fn install_linux_policy_rule() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_dns(interface: &str, dns: &str) -> Result<()> {
-    let dns = dns
-        .parse::<std::net::IpAddr>()
-        .with_context(|| format!("invalid VPN DNS address: {dns}"))?;
-    run_linux_command(
-        "resolvectl",
-        &[
-            String::from("dns"),
-            String::from(interface),
-            dns.to_string(),
-        ],
-    )?;
-    if let Err(err) = run_linux_command(
-        "resolvectl",
-        &[
-            String::from("domain"),
-            String::from(interface),
-            String::from("~cczu.edu.cn"),
-        ],
-    ) {
-        let _ = run_linux_command(
-            "resolvectl",
-            &[String::from("revert"), String::from(interface)],
-        );
-        return Err(err).context("failed to route CCZU DNS queries through the VPN interface");
-    }
-    info!(%dns, interface, "configured VPN DNS with systemd-resolved");
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn configure_linux_network(
     device: &tun_rs::SyncDevice,
     server: &cczuvpnproto::types::ProxyServer,
@@ -856,16 +825,6 @@ fn configure_linux_network(
             }
         }
     }
-    match server.dns.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(dns)) => routes.push(WindowsRoute {
-            destination: dns,
-            netmask: std::net::Ipv4Addr::new(255, 255, 255, 255),
-        }),
-        Ok(std::net::IpAddr::V6(_)) => {
-            warn!(dns = %server.dns, "VPN DNS is IPv6; no IPv4 policy route was installed");
-        }
-        Err(err) => return Err(err).context(format!("invalid VPN DNS address: {}", server.dns)),
-    }
     routes.retain(|route| route != &local_route);
     exclude_proxy_peer(&mut routes);
     routes.sort();
@@ -889,15 +848,7 @@ fn configure_linux_network(
         installed_routes.push(route);
     }
 
-    if let Err(err) = configure_linux_dns(&interface, &server.dns) {
-        for route in installed_routes.iter().rev().copied() {
-            let _ = delete_linux_route(route, gateway, &interface);
-        }
-        return Err(err);
-    }
-
     if let Err(err) = install_linux_policy_rule() {
-        let _ = run_linux_command("resolvectl", &[String::from("revert"), interface.clone()]);
         for route in installed_routes.iter().rev().copied() {
             let _ = delete_linux_route(route, gateway, &interface);
         }
@@ -927,16 +878,10 @@ fn cleanup_linux_network(config: &mut LinuxNetworkConfig) -> Result<()> {
             }
         }
     }
-    let dns_result = run_linux_command(
-        "resolvectl",
-        &[String::from("revert"), config.interface.clone()],
-    )
-    .context("failed to remove VPN DNS configuration");
-
     if let Some(err) = route_error {
         return Err(err);
     }
-    dns_result
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
